@@ -67,9 +67,11 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test):
             SNPs_Used = []
             intervals = convertChr2ListIntervals(chromosomes,chunkSize)
             for line in f: #FIXME does this remove the first line???
+                if count % samplingRate == 1:
+                    offset = f.tell() # FIXME start here!?!?!?! also, start CNS run
                 if count % samplingRate == 0:
                     lineList = line.split() # will this operation take too long??
-                    SNPs[lineList[0]].append((int(lineList[1]),f.tell()))
+                    SNPs[lineList[0]].append((int(lineList[1]),offset))
                 count += 1
             for key in SNPs:
                 SNPs[key] = np.array(SNPs[key])
@@ -89,7 +91,6 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test):
                     except:
                         print chromosome, interval
             pickle.dump(SNPs_Used,open('used_SNPs.p','wb'),2)
-
     SNP_sample_dat = sps.coo_matrix((data, (row,col))).tocsr()
     print SNP_sample_dat
     rows_size = len(rowInfo)
