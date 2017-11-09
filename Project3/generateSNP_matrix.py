@@ -8,9 +8,12 @@ import cPickle as pickle
 import seaborn as sns
 import numpy as np
 import matplotlib
+import scipy.signal as sg
+from collections import Counter
 matplotlib.use('Agg')
 matplotlib.style.use('ggplot')
 import matplotlib.pyplot as plt
+from scipy import stats
 # FIXME ADD DIMENSIONAL REDUCTION
 
 def convertChr2ListIntervals(intervalDict,chunkSize):
@@ -21,8 +24,48 @@ def convertChr2ListIntervals(intervalDict,chunkSize):
 def eraseIndels(vcfIn,vcfOutName):
     subprocess.call("vcftools --vcf %s --remove-indels --recode --recode-INFO-all --out %s"%(vcfIn,vcfOutName),shell=True)
 
+def snp_operation(f,lines,encodeAlleles,SNP_op):
+    row, col, data = [],[],[]
+    for count, line_num in enumerate(lines):
+        f.seek(line_num)
+        lineList = f.readline().split()
+        for idx,samp in filter(lambda y: y[1],enumerate(map(lambda x: encodeAlleles[x.split(':')[0]],lineList[9:]))):
+            row.append(count)
+            col.append(idx)
+            data.append(samp)
+    SNP_sample_dat = sps.coo_matrix((data, (row,col))).tocsc()
+    if SNP_op == 'mode':
+        return sps.csr_matrix(stats.mode(SNP_sample_dat.todense(),axis=0)[0]) #FIXME start here
+    elif SNP_op == 'mean':
+        return sps.csr_matrix(SNP_sample_dat.mean(axis=0))
+    elif 'smooth' in SNP_op:
+        SNP_sample_dat = SNP_sample_dat.toarray()
+        smooth = np.hstack([ sg.savgol_filter(y.T,17,13).T for y in np.hsplit(SNP_sample_dat,np.shape(SNP_sample_dat)[1])])
+        if SNP_op == 'smooth_avg':
+            return sps.csr_matrix(smooth.mean(axis=0))
+        elif SNP_op == 'smooth_positional':
+            return sps.csr_matrix(smooth[int(np.shape(smooth)[1]/2.),:])
+        else:
+            return SNP_sample_dat[int(len(SNP_sample_dat)/2.),:]
+    elif 'poly' in SNP_op:
+        SNP_sample_dat = SNP_sample_dat.toarray() # FIXME spit out values below and fit function... No KDE??
+        counts = [np.array([(i,val) for i,val in enumerate(Counter(y).values())]) for y in np.hsplit(SNP_sample_dat,np.shape(SNP_sample_dat)[1])]
+        polyfnc = [np.vectorize(lambda x: np.polyfit(count[:,0],count[:,1],4)*np.array([x**4,x**3,x**2,x,1]).T)(np.arange(0,2.01,.01)) for count in counts]
+        if SNP_op == 'poly_avg':
+            return sps.csr_matrix(np.array([np.mean(polyfnc[i]) for i in range(len(polyfnc))]))
+        elif SNP_op == 'max_poly':
+            return sps.csr_matrix(np.array([np.max(polyfnc[i]) for i in range(len(polyfnc))]))
+        else:
+            return SNP_sample_dat[int(len(SNP_sample_dat)/2.),:]
+    else:
+        return SNP_sample_dat[int(len(SNP_sample_dat)/2.),:]
+
+
+
+
+
 @begin.subcommand
-def genSNPMat(vcfIn,samplingRate,chunkSize,test):
+def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op):
     try:
         samplingRate = int(samplingRate)
         test = int(test)
@@ -73,26 +116,38 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test):
                     offset = f.tell()
                     lineList = line.split() # will this operation take too long??
                     SNPs[lineList[0]].append((int(lineList[1]),offset))
+                    if SNP_op != 'positional_original':
+                        SNPs_Used.append('_'.join(lineList[0:2]))
                 count += 1
             for key in SNPs:
                 SNPs[key] = np.array(SNPs[key])
+            SNPLines = []
             for chromosome in intervals: #FIXME Can I use BedTools to save time?
+                snp_pos = SNPs[chromosome][:,0]
                 for interval in intervals[chromosome]:
                     try:
-                        correct_SNP = SNPs[chromosome][np.argmin(abs(SNPs[chromosome][:,0] - np.mean(interval)),axis=0),:]
-                        rowInfo.append(chromosome+'-'+'_'.join(map(str,list(interval))))
-                        f.seek(correct_SNP[1])
-                        line = f.readline()
-                        lineList = line.split()
-                        SNPs_Used.append('_'.join(lineList[0:2]))
-                        for idx,samp in filter(lambda y: y[1],enumerate(map(lambda x: encodeAlleles[x.split(':')[0]],lineList[9:]))):
-                            row.append(len(rowInfo)-1)
-                            col.append(idx)
-                            data.append(samp)
+                        if SNP_op == 'positional_original':
+                            correct_SNP = SNPs[chromosome][np.argmin(abs(SNPs[chromosome][:,0] - np.mean(interval)),axis=0),:]
+                            rowInfo.append(chromosome+'-'+'_'.join(map(str,list(interval))))
+                            f.seek(correct_SNP[1])
+                            line = f.readline()
+                            lineList = line.split()
+                            SNPs_Used.append('_'.join(lineList[0:2]))
+                            for idx,samp in filter(lambda y: y[1],enumerate(map(lambda x: encodeAlleles[x.split(':')[0]],lineList[9:]))):
+                                row.append(len(rowInfo)-1)
+                                col.append(idx)
+                                data.append(samp)
+                        else:
+                            rowInfo.append(chromosome+'-'+'_'.join(map(str,list(interval))))
+                            SNPLines.append(snp_operation(f,SNPs[chromosome][(snp_pos<interval[1])&(snp_pos>=interval[0]),1],encodeAlleles,SNP_op))
+                            #SNPs_Used.append(SNPs_Used_new)
                     except:
                         print chromosome, interval
             pickle.dump(SNPs_Used,open('used_SNPs.p','wb'),2)
-    SNP_sample_dat = sps.coo_matrix((data, (row,col))).tocsr()
+    if SNP_op == 'positional_original':
+        SNP_sample_dat = sps.coo_matrix((data, (row,col))).tocsr()
+    else:
+        SNP_sample_dat = sps.vstack(SNPLines)
     print SNP_sample_dat
     rows_size = len(rowInfo)
     SNPMat = sps.dok_matrix((rows_size,rows_size))
