@@ -1,4 +1,4 @@
-import begin
+import begin, sys
 import subprocess
 from collections import defaultdict
 import scipy.sparse as sps
@@ -14,6 +14,10 @@ matplotlib.use('Agg')
 matplotlib.style.use('ggplot')
 import matplotlib.pyplot as plt
 from scipy import stats
+import plotly.graph_objs as go
+import plotly.offline as py
+from sklearn.cluster import FeatureAgglomeration
+from sklearn.decomposition import FactorAnalysis, KernelPCA
 # FIXME ADD DIMENSIONAL REDUCTION
 
 def convertChr2ListIntervals(intervalDict,chunkSize):
@@ -24,16 +28,21 @@ def convertChr2ListIntervals(intervalDict,chunkSize):
 def eraseIndels(vcfIn,vcfOutName):
     subprocess.call("vcftools --vcf %s --remove-indels --recode --recode-INFO-all --out %s"%(vcfIn,vcfOutName),shell=True)
 
-def snp_operation(f,lines,encodeAlleles,SNP_op):
-    row, col, data = [],[],[]
-    for count, line_num in enumerate(lines):
+def snp_operation(f,lines,encodeAlleles,SNP_op,n_samples):
+    #row, col, data = [],[],[]
+    SNP_sample_dat = sps.dok_matrix((len(lines),n_samples))
+    #print lines
+    for count, line_num in enumerate(list(lines)):
         f.seek(line_num)
         lineList = f.readline().split()
         for idx,samp in filter(lambda y: y[1],enumerate(map(lambda x: encodeAlleles[x.split(':')[0]],lineList[9:]))):
-            row.append(count)
-            col.append(idx)
-            data.append(samp)
-    SNP_sample_dat = sps.coo_matrix((data, (row,col))).tocsc()
+            SNP_sample_dat[count,idx] = samp
+            #row.append(count)
+            #col.append(idx)
+            #data.append(samp)
+    #print row,col,data, 'b4'
+    SNP_sample_dat = SNP_sample_dat.tocsc()#sps.coo_matrix((data, (row,col))).tocsc()
+    print SNP_sample_dat.toarray()
     if SNP_op == 'mode':
         return sps.csr_matrix(stats.mode(SNP_sample_dat.todense(),axis=0)[0]) #FIXME start here
     elif SNP_op == 'mean':
@@ -60,16 +69,49 @@ def snp_operation(f,lines,encodeAlleles,SNP_op):
     else:
         return SNP_sample_dat[int(len(SNP_sample_dat)/2.),:]
 
+@begin.subcommand
+def dimReduce(matrix_file, samples_or_SNPs, reduction_technique, dimensions, transform_metric, out_fname):
+    dimensions = int(dimensions)
+    if dimensions > 3 or dimensions < 3:
+        print 'Reduction will complete, but will be unable to plot results in 3D.'
+    matrix_SNP = sps.load_npz(matrix_file)
+    dimensionalityReducers = {'kpca': KernelPCA(n_components=dimensions,kernel=transform_metric), 'factor': FactorAnalysis(n_components=dimensions),
+                                  'feature': FeatureAgglomeration(n_clusters=dimensions)}
+    if samples_or_SNPs == 'samples':
+        matrix_SNP = matrix_SNP.T
+    if reduction_technique != 'kpca':
+        matrix_SNP = matrix_SNP.toarray()
+    transformed_data = dimensionalityReducers[reduction_technique].fit_transform(matrix_SNP)
+    np.save(out_fname,transformed_data)
+
+
+@begin.subcommand
+def plotPositions(SNPs_or_Scaffolds,positions_npy,labels_pickle,output_fname):
+    transformed_data = np.load(positions_npy)
+    labels = pickle.load(open(labels_pickle,'rb'))
+    if output_fname.endswith('.html') == 0:
+        output_fname += '.html'
+    N = 2
+    c = ['hsl(' + str(h) + ',50%' + ',50%)' for h in np.linspace(0, 360, N + 1)]
+    plots = []
+    plots.append(
+        go.Scatter3d(x=transformed_data[:,0], y=transformed_data[:,1],
+                     z=transformed_data[:,2],
+                     name=SNPs_or_Scaffolds, mode='markers',
+                     marker=dict(color=c[0], size=2), text=labels))
+    fig = go.Figure(data=plots)
+    py.plot(fig, filename=output_fname)
 
 
 
 
 @begin.subcommand
-def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op):
+def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll):
     try:
         samplingRate = int(samplingRate)
         test = int(test)
         chunkSize = int(chunkSize)
+        grabAll = int(grabAll)
     except:
         samplingRate = 10000
         test = 0
@@ -87,16 +129,31 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op):
                     chromosomes[lineInfo[0]] = int(lineInfo[1])
             elif line.startswith('#CHROM'):
                 colInfo = line.split()[9:]
+                n_samples = len(colInfo)
             else:
                 print f.tell()
                 break
         print chromosomes, colInfo
         count = 0
-        if test:
+        SNPs_Used = []
+        if grabAll:
+            for line in f: #FIXME does this remove the first line???
+                #print line
+                lineList = line.split()
+                SNPs_Used.append('_'.join(lineList[0:2]))
+                rowInfo.append('_'.join(lineList[0:2]))
+                for idx,samp in filter(lambda y: y[1],enumerate(map(lambda x: encodeAlleles[x.split(':')[0]],lineList[9:]))):
+                    if samp != 0:
+                        row.append(len(rowInfo)-1)
+                        col.append(idx)
+                        data.append(samp)
+            pickle.dump(SNPs_Used,open('used_SNPs.p'),protocol=2)
+        elif test:
             for line in f: #FIXME does this remove the first line???
                 if count % samplingRate == 0:
                     #print line
                     lineList = line.split()
+                    SNPs_Used.append('_'.join(lineList[0:2]))
                     rowInfo.append('_'.join(lineList[0:2]))
                     for idx,samp in filter(lambda y: y[1],enumerate(map(lambda x: encodeAlleles[x.split(':')[0]],lineList[9:]))):
                         row.append(len(rowInfo)-1)
@@ -105,9 +162,9 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op):
                 count += 1
                 if count >= 10000:
                     break
+            pickle.dump(SNPs_Used,open('used_SNPs.p'),protocol=2)
         else:
             SNPs = defaultdict(list)
-            SNPs_Used = []
             intervals = convertChr2ListIntervals(chromosomes,chunkSize)
             for line in f: #FIXME does this remove the first line???
                 #if count % samplingRate == 1:
@@ -121,32 +178,41 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op):
                 count += 1
             for key in SNPs:
                 SNPs[key] = np.array(SNPs[key])
+            #print SNPs
             SNPLines = []
             for chromosome in intervals: #FIXME Can I use BedTools to save time?
-                snp_pos = SNPs[chromosome][:,0]
-                for interval in intervals[chromosome]:
-                    try:
-                        if SNP_op == 'positional_original':
-                            correct_SNP = SNPs[chromosome][np.argmin(abs(SNPs[chromosome][:,0] - np.mean(interval)),axis=0),:]
-                            rowInfo.append(chromosome+'-'+'_'.join(map(str,list(interval))))
-                            f.seek(correct_SNP[1])
-                            line = f.readline()
-                            lineList = line.split()
-                            SNPs_Used.append('_'.join(lineList[0:2]))
-                            for idx,samp in filter(lambda y: y[1],enumerate(map(lambda x: encodeAlleles[x.split(':')[0]],lineList[9:]))):
-                                row.append(len(rowInfo)-1)
-                                col.append(idx)
-                                data.append(samp)
-                        else:
-                            rowInfo.append(chromosome+'-'+'_'.join(map(str,list(interval))))
-                            SNPLines.append(snp_operation(f,SNPs[chromosome][(snp_pos<interval[1])&(snp_pos>=interval[0]),1],encodeAlleles,SNP_op))
-                            #SNPs_Used.append(SNPs_Used_new)
-                    except:
-                        print chromosome, interval
+                #print chromosome
+                try:
+                    snp_pos = SNPs[chromosome][:,0]
+                    for interval in intervals[chromosome]:
+                        try:
+                            if SNP_op == 'positional_original':
+                                correct_SNP = SNPs[chromosome][np.argmin(abs(SNPs[chromosome][:,0] - np.mean(interval)),axis=0),:]
+                                rowInfo.append(chromosome+'-'+'_'.join(map(str,list(interval))))
+                                f.seek(correct_SNP[1])
+                                line = f.readline()
+                                lineList = line.split()
+                                SNPs_Used.append('_'.join(lineList[0:2]))
+                                for idx,samp in filter(lambda y: y[1],enumerate(map(lambda x: encodeAlleles[x.split(':')[0]],lineList[9:]))):
+                                    row.append(len(rowInfo)-1)
+                                    col.append(idx)
+                                    data.append(samp)
+                            else:
+                                print interval, snp_pos
+                                lines = SNPs[chromosome][(snp_pos<interval[1])&(snp_pos>=interval[0]),1]
+                                if list(lines):
+                                    rowInfo.append(chromosome+'-'+'_'.join(map(str,list(interval))))
+                                    SNPLines.append(snp_operation(f,lines,encodeAlleles,SNP_op,n_samples))
+                                #SNPs_Used.append(SNPs_Used_new)
+                        except:
+                            pass
+                except:
+                    print chromosome
             pickle.dump(SNPs_Used,open('used_SNPs.p','wb'),2)
     if SNP_op == 'positional_original':
         SNP_sample_dat = sps.coo_matrix((data, (row,col))).tocsr()
     else:
+        #print SNPLines
         SNP_sample_dat = sps.vstack(SNPLines)
     print SNP_sample_dat
     rows_size = len(rowInfo)
@@ -154,9 +220,11 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op):
     for i,j in combinations(range(rows_size),r=2):
         r = pearsonr(SNP_sample_dat.getrow(i).todense().T,SNP_sample_dat.getrow(j).todense().T)[0]
         SNPMat[i,j], SNPMat[j,i] = r, r
+    for i in range(rows_size):
+        SNPMat[i,i] = 1.
     SNPMat = SNPMat.tocsc()
-    pickle.dump(colInfo,open('colNames.p','wb'),2)
-    pickle.dump(rowInfo,open('rowNames.p','wb'),2)
+    pickle.dump(colInfo,open('samples.p','wb'),2)
+    pickle.dump(rowInfo,open('regions.p','wb'),2)
     sps.save_npz('SNP_to_Sample.npz',SNP_sample_dat)
     sps.save_npz('SNP_to_SNP.npz',SNPMat)
     plt.figure()
