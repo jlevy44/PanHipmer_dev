@@ -18,6 +18,9 @@ import plotly.graph_objs as go
 import plotly.offline as py
 from sklearn.cluster import FeatureAgglomeration
 from sklearn.decomposition import FactorAnalysis, KernelPCA
+import hdbscan
+from sklearn.metrics.pairwise import pairwise_distances
+from sklearn.neighbors import NearestNeighbors
 # FIXME ADD DIMENSIONAL REDUCTION
 
 def convertChr2ListIntervals(intervalDict,chunkSize):
@@ -84,21 +87,62 @@ def dimReduce(matrix_file, samples_or_SNPs, reduction_technique, dimensions, tra
     transformed_data = dimensionalityReducers[reduction_technique].fit_transform(matrix_SNP)
     np.save(out_fname,transformed_data)
 
+@begin.subcommand
+def build_distance_matrix(SNP_Samples_positions_npy, metric, output_fname): #FIXME add output to format readable by phylip
+    transformed_data = np.load(SNP_Samples_positions_npy)
+    distance_matrix = pairwise_distances(transformed_data,metric=metric)
+    np.save(output_fname, distance_matrix)
 
 @begin.subcommand
-def plotPositions(SNPs_or_Scaffolds,positions_npy,labels_pickle,output_fname):
+def build_Nearest_Neighbors(SNP_Samples_positions_npy, n_neighbors, metric, output_fname):
+    """Construct knearest neighbors graph """
+    transformed_data = np.load(SNP_Samples_positions_npy)
+    n_neighbors = int(n_neighbors)
+    neigh = NearestNeighbors(n_neighbors=n_neighbors, algorithm = 'brute' , metric=metric)
+    neigh.fit(transformed_data)
+    kneighbors = neigh.kneighbors_graph(transformed_data)
+    np.save(output_fname,kneighbors)
+
+#FIXME add plotly function to plot graph using networkx and plotly, with ability to input initial positions or spectral etc
+
+@begin.subcommand
+def cluster_samples(samples_positions_npy, min_cluster_size, cluster_metric, alpha):
+    min_cluster_size = int(min_cluster_size)
+    alpha = float(alpha)
+    transformed_data = np.load(samples_positions_npy)
+    clusterer = hdbscan.HDBSCAN(min_cluster_size = min_cluster_size, metric = cluster_metric, alpha = alpha)
+    clusters = clusterer.fit_predict(transformed_data)
+    pickle.dump(clusters,'clusters_output.p')
+    plt.figure()
+    clusterer.single_linkage_tree_.plot(cmap='viridis', colorbar=True)
+    plt.savefig('cluster_Tree_Output.png') #FIXME add name of species
+
+@begin.subcommand
+def plotPositions(SNPs_or_Samples,positions_npy,labels_pickle, colors_pickle,output_fname):
     transformed_data = np.load(positions_npy)
     labels = pickle.load(open(labels_pickle,'rb'))
     if output_fname.endswith('.html') == 0:
         output_fname += '.html'
-    N = 2
-    c = ['hsl(' + str(h) + ',50%' + ',50%)' for h in np.linspace(0, 360, N + 1)]
-    plots = []
-    plots.append(
-        go.Scatter3d(x=transformed_data[:,0], y=transformed_data[:,1],
-                     z=transformed_data[:,2],
-                     name=SNPs_or_Scaffolds, mode='markers',
-                     marker=dict(color=c[0], size=2), text=labels))
+    if colors_pickle.endswith('.p'):
+        clusters = pickle.load(open(colors_pickle,'rb'))
+        c = ['hsl(' + str(h) + ',50%' + ',50%)' for h in np.linspace(0, 360, int(np.max(clusters)) + 2)]
+        names = np.vectorize(lambda x: 'Cluster %d'%x)(clusters)
+        plots = []
+        for cluster in set(clusters):
+            plots.append(
+                go.Scatter3d(x=transformed_data[clusters == cluster,0], y=transformed_data[clusters == cluster,1],
+                             z=transformed_data[clusters == cluster,2],
+                             name=names[clusters == cluster], mode='markers',
+                             marker=dict(color=c[cluster], size=2), text=np.array(labels)[clusters == cluster]))
+    else:
+        N = 2
+        c = ['hsl(' + str(h) + ',50%' + ',50%)' for h in np.linspace(0, 360, N + 1)]
+        plots = []
+        plots.append(
+            go.Scatter3d(x=transformed_data[:,0], y=transformed_data[:,1],
+                         z=transformed_data[:,2],
+                         name=SNPs_or_Samples, mode='markers',
+                         marker=dict(color=c[0], size=2), text=labels))
     fig = go.Figure(data=plots)
     py.plot(fig, filename=output_fname)
 
@@ -140,14 +184,14 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll):
             for line in f: #FIXME does this remove the first line???
                 #print line
                 lineList = line.split()
-                SNPs_Used.append('_'.join(lineList[0:2]))
+
                 rowInfo.append('_'.join(lineList[0:2]))
                 for idx,samp in filter(lambda y: y[1],enumerate(map(lambda x: encodeAlleles[x.split(':')[0]],lineList[9:]))):
                     if samp != 0:
                         row.append(len(rowInfo)-1)
                         col.append(idx)
                         data.append(samp)
-            pickle.dump(SNPs_Used,open('used_SNPs.p'),protocol=2)
+            SNPs_Used = rowInfo
         elif test:
             for line in f: #FIXME does this remove the first line???
                 if count % samplingRate == 0:
@@ -162,7 +206,6 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll):
                 count += 1
                 if count >= 10000:
                     break
-            pickle.dump(SNPs_Used,open('used_SNPs.p'),protocol=2)
         else:
             SNPs = defaultdict(list)
             intervals = convertChr2ListIntervals(chromosomes,chunkSize)
@@ -208,7 +251,7 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll):
                             pass
                 except:
                     print chromosome
-            pickle.dump(SNPs_Used,open('used_SNPs.p','wb'),2)
+        pickle.dump(SNPs_Used,open('used_SNPs.p','wb'),2)
     if SNP_op == 'positional_original':
         SNP_sample_dat = sps.coo_matrix((data, (row,col))).tocsr()
     else:
@@ -227,12 +270,13 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll):
     pickle.dump(rowInfo,open('regions.p','wb'),2)
     sps.save_npz('SNP_to_Sample.npz',SNP_sample_dat)
     sps.save_npz('SNP_to_SNP.npz',SNPMat)
-    plt.figure()
-    sns_plot = sns.heatmap(SNP_sample_dat.todense(),annot=False)
-    plt.savefig('SNP_to_Sample.png')
-    plt.figure()
-    sns_plot = sns.heatmap(SNPMat.todense(),annot=False)
-    plt.savefig('SNP_to_SNP.png')
+    if grabAll == 0:
+        plt.figure()
+        sns_plot = sns.heatmap(SNP_sample_dat.todense(),annot=False)
+        plt.savefig('SNP_to_Sample.png')
+        plt.figure()
+        sns_plot = sns.heatmap(SNPMat.todense(),annot=False)
+        plt.savefig('SNP_to_SNP.png')
 
 @begin.start
 def main():
