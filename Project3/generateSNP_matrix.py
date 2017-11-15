@@ -112,7 +112,7 @@ def cluster_samples(samples_positions_npy, min_cluster_size, cluster_metric, alp
     transformed_data = np.load(samples_positions_npy)
     clusterer = hdbscan.HDBSCAN(min_cluster_size = min_cluster_size, metric = cluster_metric, alpha = alpha)
     clusters = clusterer.fit_predict(transformed_data)
-    pickle.dump(clusters,'clusters_output.p')
+    pickle.dump(clusters,open('clusters_output.p','wb'))
     plt.figure()
     clusterer.single_linkage_tree_.plot(cmap='viridis', colorbar=True)
     plt.savefig('cluster_Tree_Output.png') #FIXME add name of species
@@ -252,25 +252,26 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll):
                 except:
                     print chromosome
         pickle.dump(SNPs_Used,open('used_SNPs.p','wb'),2)
-    if SNP_op == 'positional_original':
+    if grabAll or test or SNP_op == 'positional_original':
         SNP_sample_dat = sps.coo_matrix((data, (row,col))).tocsr()
     else:
         #print SNPLines
         SNP_sample_dat = sps.vstack(SNPLines)
     print SNP_sample_dat
-    rows_size = len(rowInfo)
-    SNPMat = sps.dok_matrix((rows_size,rows_size))
-    for i,j in combinations(range(rows_size),r=2):
-        r = pearsonr(SNP_sample_dat.getrow(i).todense().T,SNP_sample_dat.getrow(j).todense().T)[0]
-        SNPMat[i,j], SNPMat[j,i] = r, r
-    for i in range(rows_size):
-        SNPMat[i,i] = 1.
-    SNPMat = SNPMat.tocsc()
     pickle.dump(colInfo,open('samples.p','wb'),2)
     pickle.dump(rowInfo,open('regions.p','wb'),2)
     sps.save_npz('SNP_to_Sample.npz',SNP_sample_dat)
-    sps.save_npz('SNP_to_SNP.npz',SNPMat)
     if grabAll == 0:
+        rows_size = len(rowInfo)
+        SNPMat = sps.dok_matrix((rows_size,rows_size))
+        #FIXME error here for true divide
+        for i,j in combinations(range(rows_size),r=2):
+            r = pearsonr(SNP_sample_dat.getrow(i).todense().T,SNP_sample_dat.getrow(j).todense().T)[0]
+            SNPMat[i,j], SNPMat[j,i] = r, r
+        for i in range(rows_size):
+            SNPMat[i,i] = 1.
+        SNPMat = SNPMat.tocsc()
+        sps.save_npz('SNP_to_SNP.npz',SNPMat)
         plt.figure()
         sns_plot = sns.heatmap(SNP_sample_dat.todense(),annot=False)
         plt.savefig('SNP_to_Sample.png')
