@@ -21,6 +21,12 @@ from sklearn.decomposition import FactorAnalysis, KernelPCA
 import hdbscan
 from sklearn.metrics.pairwise import pairwise_distances
 from sklearn.neighbors import NearestNeighbors
+from scipy.cluster.hierarchy import dendrogram, linkage
+from scipy.spatial.distance import squareform
+import plotly.figure_factory as ff
+from Bio.Phylo.TreeConstruction import DistanceTreeConstructor, _DistanceMatrix
+from Bio import Phylo
+import networkx as nx
 # FIXME ADD DIMENSIONAL REDUCTION
 
 def convertChr2ListIntervals(intervalDict,chunkSize):
@@ -88,20 +94,55 @@ def dimReduce(matrix_file, samples_or_SNPs, reduction_technique, dimensions, tra
     np.save(out_fname,transformed_data)
 
 @begin.subcommand
-def build_distance_matrix(SNP_Samples_positions_npy, metric, output_fname): #FIXME add output to format readable by phylip
+def build_distance_matrix(SNP_Samples_positions_npy, metric, output_fname, to_phylip_tree, samples_pickle, tree_method): #FIXME add output to format readable by phylip
+    to_phylip_tree = int(to_phylip_tree)
     transformed_data = np.load(SNP_Samples_positions_npy)
     distance_matrix = pairwise_distances(transformed_data,metric=metric)
     np.save(output_fname, distance_matrix)
+    if to_phylip_tree:
+        if tree_method not in ['fitch','kitsch','neighbor']: #FIXME broken
+            tree_method = 'neighbor'
+        samples = pickle.load(open(samples_pickle,'rb'))
+        constructor = DistanceTreeConstructor()
+        dm = _DistanceMatrix(names=samples,matrix=[list(distance_matrix[i,0:i+1]) for i in range(len(samples))])
+        tree = constructor.nj(dm)
+        Phylo.write(tree,'output_tree_biopython.nh','newick')
+        dm.format_phylip(open('distance_matrix.dat','w'))
+        # FIXME need to output correct distance_matrix phylip file... There are errors
+        # tree methods are fitch kitsch neighbor
+        #with open('distance_matrix.dat','w') as f: # FIXME in future compute lower triangle to same memory .replace('.','').replace('-','').replace('l','')
+        #    f.write(dm.format_phylip(open('distance_matrix.dat','w')))#f.write(str(len(samples)).ljust(10)+'\n'+str(dm))
+            #f.write(str(len(samples)).ljust(10)+'\n'+'\n'.join(samples[i].replace('.','').replace('-','').ljust(10)+ '  ' + '  '.join(np.vectorize(lambda x: '%.4f'%x)(distance_matrix[i,:])) for i in range(len(samples))))
+        #FNeighborCommandLine()
+        #subprocess.call('f%s -datafile distance_matrix.dat'%tree_method,shell=True)
+
 
 @begin.subcommand
-def build_Nearest_Neighbors(SNP_Samples_positions_npy, n_neighbors, metric, output_fname):
+def output_Dendrogram(distance_matrix_npy, samples_pickle):
+    distance_matrix = np.load(distance_matrix_npy)
+    dists = squareform(distance_matrix)
+    linkage_mat = linkage(dists, 'single')
+    samples = pickle.load(open(samples_pickle,'rb'))
+    plt.figure()
+    dendrogram(linkage_mat,labels=samples)
+    plt.savefig('output_dendrogram.png')
+    fig = ff.create_dendrogram(linkage_mat, orientation='left', labels=samples)
+    fig['layout'].update({'width':1200, 'height':1800})
+    py.plot(fig, filename='output_dendrogram.html')
+
+
+
+
+
+@begin.subcommand
+def build_Nearest_Neighbors(SNP_Samples_positions_npy, n_neighbors, metric, output_fname_npz):
     """Construct knearest neighbors graph """
     transformed_data = np.load(SNP_Samples_positions_npy)
     n_neighbors = int(n_neighbors)
     neigh = NearestNeighbors(n_neighbors=n_neighbors, algorithm = 'brute' , metric=metric)
     neigh.fit(transformed_data)
     kneighbors = neigh.kneighbors_graph(transformed_data)
-    np.save(output_fname,kneighbors)
+    sps.save_npz(output_fname_npz, kneighbors)
 
 #FIXME add plotly function to plot graph using networkx and plotly, with ability to input initial positions or spectral etc
 
@@ -118,9 +159,32 @@ def cluster_samples(samples_positions_npy, min_cluster_size, cluster_metric, alp
     plt.savefig('cluster_Tree_Output.png') #FIXME add name of species
 
 @begin.subcommand
-def plotPositions(SNPs_or_Samples,positions_npy,labels_pickle, colors_pickle,output_fname):
-    transformed_data = np.load(positions_npy)
+def plotPositions(SNPs_or_Samples,positions_npy, labels_pickle, colors_pickle,output_fname, graph_file, layout, iterations):
     labels = pickle.load(open(labels_pickle,'rb'))
+    iterations = int(iterations)
+    if graph_file.endswith('.npz'):
+        graph = 1
+        G = nx.from_scipy_sparse_matrix(sps.load_npz(graph_file))
+        mapping = {i:labels[i] for i in range(len(labels))}
+        G=nx.relabel_nodes(G,mapping, copy=False)
+        if layout == 'spectral':
+            pos = nx.spring_layout(G,dim=3,iterations=iterations,pos=nx.spectral_layout(G,dim=3))
+        elif layout == 'random':
+            pos = nx.random_layout(G, dim=3)
+        else:
+            t_data = np.load(positions_npy)
+            pos = nx.spring_layout(G,dim=3,iterations=iterations,pos={labels[i]: tuple(t_data[i,:]) for i in range(len(labels))})
+        transformed_data = np.array([tuple(pos[k]) for k in G.nodes()])
+        Xed = []
+        Yed = []
+        Zed = []
+        for edge in G.edges():
+            Xed += [pos[edge[0]][0], pos[edge[1]][0], None]
+            Yed += [pos[edge[0]][1], pos[edge[1]][1], None]
+            Zed += [pos[edge[0]][2], pos[edge[1]][2], None]
+    else:
+        transformed_data = np.load(positions_npy)
+        graph = 0
     if output_fname.endswith('.html') == 0:
         output_fname += '.html'
     if colors_pickle.endswith('.p'):
@@ -143,6 +207,14 @@ def plotPositions(SNPs_or_Samples,positions_npy,labels_pickle, colors_pickle,out
                          z=transformed_data[:,2],
                          name=SNPs_or_Samples, mode='markers',
                          marker=dict(color=c[0], size=2), text=labels))
+    if graph:
+        plots.append(go.Scatter3d(x=Xed,
+                                  y=Yed,
+                                  z=Zed,
+                                  mode='lines',
+                                  line=go.Line(color='rgb(210,210,210)', width=1),
+                                  hoverinfo='none'
+                                  ))
     fig = go.Figure(data=plots)
     py.plot(fig, filename=output_fname)
 
