@@ -222,18 +222,24 @@ def plotPositions(SNPs_or_Samples,positions_npy, labels_pickle, colors_pickle,ou
 
 
 @begin.subcommand
-def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll):
+def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll, no_contig_info, encoded_vcf): # FIXME also add more vcf filters!! LD filter and ability to add reference species to data points (0,0,0)
     try:
         samplingRate = int(samplingRate)
         test = int(test)
         chunkSize = int(chunkSize)
         grabAll = int(grabAll)
+        encoded_vcf = int(encoded_vcf)
+        no_contig_info = int(no_contig_info)
     except:
         samplingRate = 10000
         test = 0
         chunkSize = 100000
+        encoded_vcf = 0
+        no_contig_info = 0
     chromosomes = defaultdict(list)
     encodeAlleles = {'0/0':0,'0/1':1,'1/1':2}
+    if encoded_vcf:
+        encodeAlleles = {'0':0,'1':1,'2':2}
     colInfo = []
     rowInfo = []
     row, col, data = [],[],[]
@@ -249,6 +255,8 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll):
             else:
                 print f.tell()
                 break
+        #    offset = f.tell()
+        #f.seek(offset) #FIXME Test!!
         print chromosomes, colInfo
         count = 0
         SNPs_Used = []
@@ -256,7 +264,6 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll):
             for line in f: #FIXME does this remove the first line???
                 #print line
                 lineList = line.split()
-
                 rowInfo.append('_'.join(lineList[0:2]))
                 for idx,samp in filter(lambda y: y[1],enumerate(map(lambda x: encodeAlleles[x.split(':')[0]],lineList[9:]))):
                     if samp != 0:
@@ -280,7 +287,6 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll):
                     break
         else:
             SNPs = defaultdict(list)
-            intervals = convertChr2ListIntervals(chromosomes,chunkSize)
             for line in f: #FIXME does this remove the first line???
                 #if count % samplingRate == 1:
                 #    offset = f.tell() # FIXME start here!?!?!?! also, start CNS run HELP!!!
@@ -294,6 +300,9 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll):
             for key in SNPs:
                 SNPs[key] = np.array(SNPs[key])
             #print SNPs
+            if no_contig_info:
+                chromosomes = {chromosome: max(SNPs[chromosome][:,0]) for chromosome in SNPs}
+            intervals = convertChr2ListIntervals(chromosomes,chunkSize)
             SNPLines = []
             for chromosome in intervals: #FIXME Can I use BedTools to save time?
                 #print chromosome
@@ -302,7 +311,7 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll):
                     for interval in intervals[chromosome]:
                         try:
                             if SNP_op == 'positional_original':
-                                correct_SNP = SNPs[chromosome][np.argmin(abs(SNPs[chromosome][:,0] - np.mean(interval)),axis=0),:]
+                                correct_SNP = SNPs[chromosome][np.argmin(abs(snp_pos - np.mean(interval)),axis=0),:]
                                 rowInfo.append(chromosome+'-'+'_'.join(map(str,list(interval))))
                                 f.seek(correct_SNP[1])
                                 line = f.readline()
