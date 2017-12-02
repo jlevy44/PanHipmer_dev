@@ -80,7 +80,10 @@ def snp_operation(f,lines,encodeAlleles,SNP_op,n_samples):
 
 @begin.subcommand
 def dimReduce(matrix_file, samples_or_SNPs, reduction_technique, dimensions, transform_metric, out_fname):
-    dimensions = int(dimensions)
+    try:
+        dimensions = int(dimensions)
+    except:
+        dimensions = 3
     if dimensions > 3 or dimensions < 3:
         print 'Reduction will complete, but will be unable to plot results in 3D.'
     matrix_SNP = sps.load_npz(matrix_file)
@@ -222,7 +225,7 @@ def plotPositions(SNPs_or_Samples,positions_npy, labels_pickle, colors_pickle,ou
 
 
 @begin.subcommand
-def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll, no_contig_info, encoded_vcf): # FIXME also add more vcf filters!! LD filter and ability to add reference species to data points (0,0,0)
+def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll, no_contig_info, encoded_vcf): # FIXME also add more vcf filters!! LD filter and ability to add reference species to data points (0,0,0) http://evomics.org/learning/population-and-speciation-genomics/fileformats-vcftools-plink/#ex3.2.2
     try:
         samplingRate = int(samplingRate)
         test = int(test)
@@ -238,15 +241,16 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll, no_contig_info
         no_contig_info = 0
     chromosomes = defaultdict(list)
     encodeAlleles = {'0/0':0,'0/1':1,'1/1':2}
-    if encoded_vcf:
-        encodeAlleles = {'0':0,'1':1,'2':2}
+    if encoded_vcf: #FIXME how to find minor allele info
+        encodeAlleles = {str(i):i for i in range(9)} # FIXME note that this only covers variants in one allele, not two, if no variant, 0, if 1st variant, 1, if 2nd variant, 2, if 3rd variant, 3, but 1, 2, 3 are uncorrelated!!! might as well make it binary
+        encodeAlleles['.'] = 0
     colInfo = []
     rowInfo = []
     row, col, data = [],[],[]
     with open(vcfIn,'r') as f:
         for line in f:
             if line.startswith('##'):
-                if line.startswith('##contig'):
+                if line.startswith('##contig') and no_contig_info == 0:
                     lineInfo = map(lambda x: x.split('=')[1],line[line.find('<'):line.rfind('>')].split(','))
                     chromosomes[lineInfo[0]] = int(lineInfo[1])
             elif line.startswith('#CHROM'):
