@@ -134,7 +134,11 @@ def output_Dendrogram(distance_matrix_npy, samples_pickle):
     py.plot(fig, filename='output_dendrogram.html')
 
 
-
+@begin.subcommand
+def reroot_Tree(tree_in,root_species,tree_out):
+    t = Phylo.read(tree_in,'newick')
+    t.root_with_outgroup(root_species)
+    Phylo.write(t,tree_out,'newick')
 
 
 @begin.subcommand
@@ -243,7 +247,7 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll, no_contig_info
     encodeAlleles = {'0/0':0,'0/1':1,'1/1':2}
     if encoded_vcf: #FIXME how to find minor allele info
         encodeAlleles = {str(i):i for i in range(9)} # FIXME note that this only covers variants in one allele, not two, if no variant, 0, if 1st variant, 1, if 2nd variant, 2, if 3rd variant, 3, but 1, 2, 3 are uncorrelated!!! might as well make it binary
-        encodeAlleles['.'] = 0
+        encodeAlleles['.'] = -1 #FIXME change this encoding mapping, because N is not a lack of genetic variant
     colInfo = []
     rowInfo = []
     row, col, data = [],[],[]
