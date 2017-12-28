@@ -166,7 +166,7 @@ def cluster_samples(samples_positions_npy, min_cluster_size, cluster_metric, alp
     plt.savefig('cluster_Tree_Output.png') #FIXME add name of species
 
 @begin.subcommand
-def plotPositions(SNPs_or_Samples,positions_npy, labels_pickle, colors_pickle,output_fname, graph_file, layout, iterations):
+def plotPositions(SNPs_or_Samples, positions_npy, labels_pickle, colors_pickle,output_fname, graph_file, layout, iterations):
     labels = pickle.load(open(labels_pickle,'rb'))
     iterations = int(iterations)
     if graph_file.endswith('.npz'):
@@ -181,7 +181,7 @@ def plotPositions(SNPs_or_Samples,positions_npy, labels_pickle, colors_pickle,ou
         else:
             t_data = np.load(positions_npy)
             pos = nx.spring_layout(G,dim=3,iterations=iterations,pos={labels[i]: tuple(t_data[i,:]) for i in range(len(labels))})
-        transformed_data = np.array([tuple(pos[k]) for k in G.nodes()])
+        transformed_data = np.array([tuple(pos[k]) for k in labels]) # G.nodes()
         Xed = []
         Yed = []
         Zed = []
