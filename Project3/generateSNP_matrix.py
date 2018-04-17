@@ -17,7 +17,9 @@ from scipy import stats
 import plotly.graph_objs as go
 import plotly.offline as py
 from sklearn.cluster import FeatureAgglomeration
+from sklearn.pipeline import Pipeline
 from sklearn.decomposition import FactorAnalysis, KernelPCA
+from sklearn.preprocessing import StandardScaler
 import hdbscan
 from sklearn.metrics.pairwise import pairwise_distances
 from sklearn.neighbors import NearestNeighbors
@@ -27,6 +29,9 @@ import plotly.figure_factory as ff
 from Bio.Phylo.TreeConstruction import DistanceTreeConstructor, _DistanceMatrix
 from Bio import Phylo
 import networkx as nx
+import os
+from pybedtools import BedTool
+import pandas as pd
 # FIXME ADD DIMENSIONAL REDUCTION
 
 def convertChr2ListIntervals(intervalDict,chunkSize):
@@ -166,7 +171,7 @@ def cluster_samples(samples_positions_npy, min_cluster_size, cluster_metric, alp
     plt.savefig('cluster_Tree_Output.png') #FIXME add name of species
 
 @begin.subcommand
-def plotPositions(SNPs_or_Samples, positions_npy, labels_pickle, colors_pickle,output_fname, graph_file, layout, iterations):
+def plotPositions(SNPs_or_Samples, positions_npy, labels_pickle, alt_labels, colors_pickle,output_fname, graph_file, layout, iterations):
     labels = pickle.load(open(labels_pickle,'rb'))
     iterations = int(iterations)
     if graph_file.endswith('.npz'):
@@ -196,8 +201,13 @@ def plotPositions(SNPs_or_Samples, positions_npy, labels_pickle, colors_pickle,o
         output_fname += '.html'
     if colors_pickle.endswith('.p'):
         clusters = pickle.load(open(colors_pickle,'rb'))
-        c = ['hsl(' + str(h) + ',50%' + ',50%)' for h in np.linspace(0, 360, int(np.max(clusters)) + 2)]
-        names = np.vectorize(lambda x: 'Cluster %d'%x)(clusters)
+        clusters_set = set(clusters)
+        c = ['hsl(' + str(h) + ',50%' + ',50%)' for h in np.linspace(0, 360, len(set(clusters)) + 2)] # int(np.max(clusters))
+        if int(alt_labels):
+            names = clusters
+            c = dict(zip(list(clusters_set),c[:len(clusters_set)]))
+        else:
+            names = np.vectorize(lambda x: 'Cluster %d'%x)(clusters)
         plots = []
         for cluster in set(clusters):
             plots.append(
@@ -223,7 +233,7 @@ def plotPositions(SNPs_or_Samples, positions_npy, labels_pickle, colors_pickle,o
                                   hoverinfo='none'
                                   ))
     fig = go.Figure(data=plots)
-    py.plot(fig, filename=output_fname)
+    py.plot(fig, filename=output_fname,auto_open=False)
 
 
 
@@ -367,6 +377,131 @@ def genSNPMat(vcfIn,samplingRate,chunkSize,test, SNP_op, grabAll, no_contig_info
         plt.figure()
         sns_plot = sns.heatmap(SNPMat.todense(),annot=False)
         plt.savefig('SNP_to_SNP.png')
+
+#########################################################################
+############################ LOCAL PCA WORK #############################
+
+@begin.subcommand
+def local_pca(query_species,split_length,sliding_window, non_local, mantel_distance): # perform local pca on snps with 0, 1, 2, etc encodings only...
+    """Take VCF, bin regions, and turn each region into matrix. PCA each matrix and plot results."""
+    from sklearn.metrics import fowlkes_mallows_score
+    from sklearn.cluster import AgglomerativeClustering
+    from sklearn.manifold import MDS
+    from sklearn.metrics.pairwise import pairwise_distances
+    from scipy.spatial.distance import squareform
+    #from skbio.stats.distance import mantel, DistanceMatrix
+    species_name, fai_file, vcf_file = tuple(query_species.split(','))
+    vcf_header = os.popen("grep '#' "+vcf_file).read().splitlines()
+    for line in vcf_header:
+        if '#CHROM' in line:
+            species = line.split()[9:]
+    #print vcf_header
+    if int(non_local):
+        subprocess.call('cut -f 1-2 %s > %s.genome'%(fai_file,fai_file),shell=True)
+        subprocess.call('bedtools makewindows -g %s.genome -w %d %s > local.windows.bed'%(fai_file,int(split_length),'-s %d'%(int(split_length)/2 if int(sliding_window) else '')),shell=True)
+        windows = pd.read_table('local.windows.bed',skip_blank_lines=True, header=None)
+    #vcf_intervals = BedTool(vcf_file)
+    snp_sparse_matrices = defaultdict(list)
+    snp_df = pd.read_table(vcf_file,header=next((i for i,line in enumerate(open(vcf_file,'r')) if line.startswith('#CHROM'))))#6)
+    #print windows
+    snp_df = snp_df.replace(['.'],[-1])#.iloc[:,9:][snp_df.iloc[:,9:] == '.'] = -1
+    if int(non_local):
+        for index, df in snp_df.groupby(np.arange(len(snp_df))//int(split_length)):
+            chroms = set(df['#CHROM'])
+            if len(chroms) == 1:
+                interval_data = '_'.join([list(chroms)[0],str(np.min(df['POS'])),str(np.max(df['POS']))])
+                snp_sparse_matrices[interval_data] = sps.csr_matrix(df.iloc[:,9:].as_matrix().astype(np.int))
+    else:
+        for index, row in windows.iterrows():
+            interval_data = '_'.join(np.vectorize(str)(row.as_matrix()))
+            #print interval_data
+            snp_sparse_matrices[interval_data] = sps.csr_matrix(snp_df[(snp_df['#CHROM'] == row[0]) & (snp_df['POS'] >= int(row[1])) & (snp_df['POS'] <= int(row[2]))].iloc[:,9:].as_matrix().astype(np.int))
+    """
+    with open('local.windows.bed','r') as f:
+        for line in f:
+            if line:
+                interval_data = '_'.join([species_name]+line.split())
+                local_interval = vcf_intervals.intersect(BedTool(line,from_string=True),wa=True)
+                row, col, data = [],[],[]
+                local_snps = filter(lambda x: x.startswith('#') == 0,str(local_interval).splitlines())
+                if local_snps:
+                    for i,line2 in enumerate(local_snps):
+                        ll = line2.split()
+                        #print ll
+                        for j, snp in enumerate(ll[9:]):
+                            snp = (int(snp) if snp != '.' else -1)
+                            if species[j] == species_name or snp:
+                                row.append(i)
+                                col.append(j)
+                                data.append(snp)
+                    snp_sparse_matrices[interval_data] = (data,(row,col))
+                    """
+
+    t_data = []
+    master_text = []
+    cluster_data = defaultdict(list)
+    #print snp_sparse_matrices
+    for interval in snp_sparse_matrices:
+        data = snp_sparse_matrices[interval]#sps.coo_matrix(snp_sparse_matrices[interval])
+        #print data
+        if data.shape[1] == len(species) and data.shape[0] > 30:
+            transformed_data = Pipeline([('ss',StandardScaler(with_mean=False)),('kpca',KernelPCA(n_components=3, kernel = 'linear'))]).fit_transform(data.T) #.tocsr()
+            t_data.append(transformed_data) # FIXME can try to concat sparse matrices instead and transform!!!!
+            master_text.extend([interval + '|' + sp for sp in species])
+            if int(mantel_distance):
+                try:
+                    dist = pairwise_distances(transformed_data)
+                    cluster_data[interval] = (dist+dist.T)/2.#squareform( # DistanceMatrix
+                except:
+                    print interval, np.sum(np.isnan(pairwise_distances(transformed_data)))
+            else:
+                cluster_data[interval] = AgglomerativeClustering(n_clusters=6).fit_predict(transformed_data)#hdbscan.HDBSCAN(min_cluster_size = 2, metric = 'euclidean', alpha = 1.0).fit_predict(transformed_data)
+
+    cluster_keys = sorted(cluster_data.keys())
+    df = pd.DataFrame(np.nan, index=cluster_keys, columns=cluster_keys)
+    for i,j in combinations(cluster_keys,r=2):
+        if i == j:
+            df.set_value(i,j,0)
+        if i != j:
+            if int(mantel_distance):
+                #print cluster_data[i],cluster_data[j]
+                #similarity, p = mantel(cluster_data[i],cluster_data[j],permutations=0)
+                #dissimilarity = 1-similarity
+                dissimilarity = np.linalg.norm(cluster_data[i]-cluster_data[j],None)
+                # FIXME try correlation or just subtract the two matrices and take inverse of average subtracted value
+            else:
+                dissimilarity = 1. - fowlkes_mallows_score(cluster_data[i],cluster_data[j])
+            df.set_value(i,j,dissimilarity)
+            df.set_value(j,i,dissimilarity)
+    df.to_csv('dissimilarity_matrix_local_pca.csv')
+    plt.figure()
+    sns.heatmap(df)
+    plt.savefig('dissimilarity_matrix_local_pca.png')
+    # FIXME indent below for local trees option
+    t_data = np.vstack(tuple(t_data))
+    colors = np.vectorize(lambda x: x.split('|')[-1])(master_text)
+    np.save('local_pca_transformed_data.npy',t_data)
+    pickle.dump(colors,open('species_labelled.p','wb'))
+    pickle.dump(np.array(master_text),open('species_scaffolds.p','wb'))
+    try:
+        plotPositions('Samples','local_pca_transformed_data.npy', 'species_scaffolds.p', 1, 'species_labelled.p','local_pca.html', 'xx', 'x', 1)
+    except:
+        pass
+
+    local_pca_dissimilarity = df.as_matrix()
+    local_pca_dissimilarity = np.nan_to_num(local_pca_dissimilarity)
+    #print np.max(local_pca_similarity)-local_pca_similarity
+    mds = MDS(n_components=3,dissimilarity='precomputed')
+    transformed_data = mds.fit_transform(local_pca_dissimilarity)#np.max(local_pca_similarity)-local_pca_similarity
+    np.save('local_pca_MDS_transform.npy',transformed_data)
+    pickle.dump(np.array(cluster_keys),open('local_pca_window_names.p','wb'))
+    try:
+        plotPositions('Windows','local_pca_MDS_transform.npy', 'local_pca_window_names.p', 0, '','local_pca_windows_MDS.html', 'xx', 'x', 1)
+    except:
+        pass
+
+
+
 
 @begin.start
 def main():
